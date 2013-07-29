@@ -1,5 +1,6 @@
 module Network.HaskellNet.IMAP.Connection
     ( IMAPConnection
+    , IMAPConnectionM
     , withNextCommandNum
     , setMailboxInfo
     , modifyMailboxInfo
@@ -28,6 +29,12 @@ import Control.Applicative
     ( (<$>)
     , (<*>)
     )
+import Control.Monad
+    ( liftM
+    )
+import Control.Monad.Trans
+    ( MonadIO(..)
+    )
 
 import Network.HaskellNet.BSStream
 import Network.HaskellNet.IMAP.Types
@@ -38,55 +45,56 @@ import Network.HaskellNet.IMAP.Types
     , UID
     )
 
-data IMAPConnection =
-    IMAPC { stream :: BSStream
+type IMAPConnection = IMAPConnectionM IO
+data IMAPConnectionM m =
+    IMAPC { stream :: BSStreamM m
           , mboxInfo :: IORef MailboxInfo
           , nextCommandNum :: IORef Int
           }
 
-newConnection :: BSStream -> IO IMAPConnection
-newConnection s = IMAPC s <$> (newIORef emptyMboxInfo) <*> (newIORef 0)
+newConnection :: (MonadIO m) => BSStreamM m -> m (IMAPConnectionM m)
+newConnection s = liftIO $ IMAPC s <$> (newIORef emptyMboxInfo) <*> (newIORef 0)
 
-getMailboxInfo :: IMAPConnection -> IO MailboxInfo
-getMailboxInfo c = readIORef $ mboxInfo c
+getMailboxInfo :: (MonadIO m) => IMAPConnectionM m -> m MailboxInfo
+getMailboxInfo c = liftIO $ readIORef $ mboxInfo c
 
-mailbox :: IMAPConnection -> IO MailboxName
-mailbox c = _mailbox <$> getMailboxInfo c
+mailbox :: (MonadIO m) => IMAPConnectionM m -> m MailboxName
+mailbox c = _mailbox `liftM` getMailboxInfo c
 
-exists :: IMAPConnection -> IO Integer
-exists c = _exists <$> getMailboxInfo c
+exists :: (MonadIO m) => IMAPConnectionM m -> m Integer
+exists c = _exists `liftM` getMailboxInfo c
 
-recent :: IMAPConnection -> IO Integer
-recent c = _recent <$> getMailboxInfo c
+recent :: (MonadIO m) => IMAPConnectionM m -> m Integer
+recent c = _recent `liftM` getMailboxInfo c
 
-flags :: IMAPConnection -> IO [Flag]
-flags c = _flags <$> getMailboxInfo c
+flags :: (MonadIO m) => IMAPConnectionM m -> m [Flag]
+flags c = _flags `liftM` getMailboxInfo c
 
-permanentFlags :: IMAPConnection -> IO [Flag]
-permanentFlags c = _permanentFlags <$> getMailboxInfo c
+permanentFlags :: (MonadIO m) => IMAPConnectionM m -> m [Flag]
+permanentFlags c = _permanentFlags `liftM` getMailboxInfo c
 
-isWritable :: IMAPConnection -> IO Bool
-isWritable c = _isWritable <$> getMailboxInfo c
+isWritable :: (MonadIO m) => IMAPConnectionM m -> m Bool
+isWritable c = _isWritable `liftM` getMailboxInfo c
 
-isFlagWritable :: IMAPConnection -> IO Bool
-isFlagWritable c = _isFlagWritable <$> getMailboxInfo c
+isFlagWritable :: (MonadIO m) => IMAPConnectionM m -> m Bool
+isFlagWritable c = _isFlagWritable `liftM` getMailboxInfo c
 
-uidNext :: IMAPConnection -> IO UID
-uidNext c = _uidNext <$> getMailboxInfo c
+uidNext :: (MonadIO m) => IMAPConnectionM m -> m UID
+uidNext c = _uidNext `liftM` getMailboxInfo c
 
-uidValidity :: IMAPConnection -> IO UID
-uidValidity c = _uidValidity <$> getMailboxInfo c
+uidValidity :: (MonadIO m) => IMAPConnectionM m -> m UID
+uidValidity c = _uidValidity `liftM` getMailboxInfo c
 
-withNextCommandNum :: IMAPConnection -> (Int -> IO a) -> IO (a, Int)
+withNextCommandNum :: (MonadIO m) => IMAPConnectionM m -> (Int -> m a) -> m (a, Int)
 withNextCommandNum c act = do
   let ref = nextCommandNum c
-  num <- readIORef ref
+  num <- liftIO $ readIORef ref
   result <- act num
-  modifyIORef ref (+1)
+  liftIO $ modifyIORef ref (+1)
   return (result, num)
 
-setMailboxInfo :: IMAPConnection -> MailboxInfo -> IO ()
-setMailboxInfo c = writeIORef (mboxInfo c)
+setMailboxInfo :: (MonadIO m) => IMAPConnectionM m -> MailboxInfo -> m ()
+setMailboxInfo c = liftIO . writeIORef (mboxInfo c)
 
-modifyMailboxInfo :: IMAPConnection -> (MailboxInfo -> MailboxInfo) -> IO ()
-modifyMailboxInfo c f = modifyIORef (mboxInfo c) f
+modifyMailboxInfo :: (MonadIO m) => IMAPConnectionM m -> (MailboxInfo -> MailboxInfo) -> m ()
+modifyMailboxInfo c f = liftIO $ modifyIORef (mboxInfo c) f
