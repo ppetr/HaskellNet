@@ -4,6 +4,7 @@ module Network.HaskellNet.SMTP
       Command(..)
     , Response(..)
     , SMTPConnection
+    , SMTPConnectionM
       -- * Establishing Connection
     , connectSMTPPort
     , connectSMTP
@@ -26,9 +27,9 @@ import qualified Data.ByteString.Char8 as BS
 import Network.BSD (getHostName)
 import Network
 
-import Control.Applicative ((<$>))
 import Control.Exception
-import Control.Monad (unless)
+import Control.Monad (liftM, unless)
+import Control.Monad.Trans (MonadIO(..))
 
 import Data.Char (isDigit)
 
@@ -45,9 +46,10 @@ import qualified Data.Text as T
 
 import Prelude hiding (catch)
 
+type SMTPConnection = SMTPConnectionM IO
 -- The response field seems to be unused. It's saved at one place, but never
 -- retrieved.
-data SMTPConnection = SMTPC { bsstream :: !BSStream, _response :: ![ByteString] }
+data SMTPConnectionM m = SMTPC { bsstream :: !(BSStreamM m), _response :: ![ByteString] }
 
 data Command = HELO String
              | EHLO String
@@ -90,20 +92,23 @@ data Response = Ok
                 deriving (Show, Eq)
 
 -- | connecting SMTP server with the specified name and port number.
-connectSMTPPort :: String     -- ^ name of the server
+connectSMTPPort :: (MonadIO m)
+                => String     -- ^ name of the server
                 -> PortNumber -- ^ port number
-                -> IO SMTPConnection
+                -> m (SMTPConnectionM m)
 connectSMTPPort hostname port =
-    (handleToStream <$> connectTo hostname (PortNumber port))
+    (handleToStream `liftM` liftIO (connectTo hostname (PortNumber port)))
     >>= connectStream
 
 -- | connecting SMTP server with the specified name and port 25.
-connectSMTP :: String     -- ^ name of the server
-            -> IO SMTPConnection
+connectSMTP :: (MonadIO m)
+            => String     -- ^ name of the server
+            -> m (SMTPConnectionM m)
 connectSMTP = flip connectSMTPPort 25
 
-tryCommand :: SMTPConnection -> Command -> Int -> ReplyCode
-           -> IO ByteString
+tryCommand :: (MonadIO m)
+           => SMTPConnectionM m -> Command -> Int -> ReplyCode
+           -> m ByteString
 tryCommand conn cmd tries expectedReply = do
   (code, msg) <- sendCommand conn cmd
   case () of
@@ -116,18 +121,18 @@ tryCommand conn cmd tries expectedReply = do
                  ", expected reply code " ++ show expectedReply ++
                  ", but received " ++ show code ++ " " ++ BS.unpack msg
 
--- | create SMTPConnection from already connected Stream
-connectStream :: BSStream -> IO SMTPConnection
+-- | create SMTPConnectionM m from already connected Stream
+connectStream :: (MonadIO m) => BSStreamM m -> m (SMTPConnectionM m)
 connectStream st =
     do (code1, _) <- parseResponse st
        unless (code1 == 220) $
               do bsClose st
                  fail "cannot connect to the server"
-       senderHost <- getHostName
+       senderHost <- liftIO getHostName
        msg <- tryCommand (SMTPC st []) (EHLO senderHost) 3 250
        return (SMTPC st (tail $ BS.lines msg))
 
-parseResponse :: BSStream -> IO (ReplyCode, ByteString)
+parseResponse :: (MonadIO m) => BSStreamM m -> m (ReplyCode, ByteString)
 parseResponse st =
     do (code, bdy) <- readLines
        return (read $ BS.unpack code, BS.unlines bdy)
@@ -141,7 +146,7 @@ parseResponse st =
 
 
 -- | send a method to a server
-sendCommand :: SMTPConnection -> Command -> IO (ReplyCode, ByteString)
+sendCommand :: (MonadIO m) => SMTPConnectionM m -> Command -> m (ReplyCode, ByteString)
 sendCommand (SMTPC conn _) (DATA dat) =
     do bsPutCrLf conn $ BS.pack "DATA"
        (code, _) <- parseResponse conn
@@ -188,7 +193,7 @@ sendCommand (SMTPC conn _) meth =
 
 -- | close the connection.  This function send the QUIT method, so you
 -- do not have to QUIT method explicitly.
-closeSMTP :: SMTPConnection -> IO ()
+closeSMTP :: (MonadIO m) => SMTPConnectionM m -> m ()
 closeSMTP (SMTPC conn _) = bsClose conn
 
 {-
@@ -201,16 +206,16 @@ without first sending QUIT
 
 closeSMTP c@(SMTPC conn _) =
     do sendCommand c QUIT
-       bsClose conn `catch` \(_ :: IOException) -> return ()
+       bsClose conn `catch` \(_ :: (MonadIO m) => IOException) -> return ()
 -}
 
 -- | sending a mail to a server. This is achieved by sendMessage.  If
 -- something is wrong, it raises an IOexception.
-sendMail :: String     -- ^ sender mail
+sendMail :: (MonadIO m) => String     -- ^ sender mail
          -> [String]   -- ^ receivers
          -> ByteString -- ^ data
-         -> SMTPConnection
-         -> IO ()
+         -> SMTPConnectionM m
+         -> m ()
 sendMail sender receivers dat conn = do
                  sendAndCheck (MAIL sender)
                  mapM_ (sendAndCheck . RCPT) receivers
@@ -220,7 +225,7 @@ sendMail sender receivers dat conn = do
     -- Try the command once and @fail@ if the response isn't 250.
     sendAndCheck cmd = tryCommand conn cmd 1 250
 
--- | doSMTPPort open a connection, and do an IO action with the
+-- | doSMTPPort open a connection, and do an m action with the
 -- connection, and then close it.
 doSMTPPort :: String -> PortNumber -> (SMTPConnection -> IO a) -> IO a
 doSMTPPort host port execution =
@@ -236,12 +241,12 @@ doSMTP host execution = doSMTPPort host 25 execution
 doSMTPStream :: BSStream -> (SMTPConnection -> IO a) -> IO a
 doSMTPStream s execution = bracket (connectStream s) closeSMTP execution
 
-sendMimeMail :: String -> String -> String -> LT.Text
-             -> LT.Text -> [(T.Text, FilePath)] -> SMTPConnection -> IO ()
+sendMimeMail :: (MonadIO m) => String -> String -> String -> LT.Text
+             -> LT.Text -> [(T.Text, FilePath)] -> SMTPConnectionM m -> m ()
 sendMimeMail to from subject plainBody htmlBody attachments con = do
-  myMail <- simpleMail (address to) (address from) (T.pack subject)
+  myMail <- liftIO $ simpleMail (address to) (address from) (T.pack subject)
             plainBody htmlBody attachments
-  renderedMail <- renderMail' myMail
+  renderedMail <- liftIO $ renderMail' myMail
   sendMail from [to] (lazyToStrict renderedMail) con
   closeSMTP con
   where
@@ -255,5 +260,5 @@ lazyToStrict = S.concat . B.toChunks
 crlf :: BS.ByteString
 crlf = BS.pack "\r\n"
 
-bsPutCrLf :: BSStream -> ByteString -> IO ()
+bsPutCrLf :: (MonadIO m) => BSStreamM m -> ByteString -> m ()
 bsPutCrLf h s = bsPut h s >> bsPut h crlf >> bsFlush h
