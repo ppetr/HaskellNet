@@ -106,7 +106,7 @@ connectSMTP :: (MonadIO m)
             -> m (SMTPConnectionM m)
 connectSMTP = flip connectSMTPPort 25
 
-tryCommand :: (MonadIO m)
+tryCommand :: (Monad m)
            => SMTPConnectionM m -> Command -> Int -> ReplyCode
            -> m ByteString
 tryCommand conn cmd tries expectedReply = do
@@ -121,18 +121,27 @@ tryCommand conn cmd tries expectedReply = do
                  ", expected reply code " ++ show expectedReply ++
                  ", but received " ++ show code ++ " " ++ BS.unpack msg
 
--- | create SMTPConnectionM m from already connected Stream
+-- | Create @SMTPConnectionM m@ from an already connected Stream.
+-- Gets the current host name using 'getHostName' (needs IO for that).
+--
+-- TODO: Modify so that the host name is provided by the BSStream.
 connectStream :: (MonadIO m) => BSStreamM m -> m (SMTPConnectionM m)
-connectStream st =
+connectStream st = liftIO getHostName >>= flip connectStream' st
+
+-- | Create @SMTPConnectionM m@ from an already connected Stream.
+-- Send the provided host name to the remote server.
+--
+-- TODO: Modify so that the host name is provided by the BSStream.
+connectStream' :: (Monad m) => HostName -> BSStreamM m -> m (SMTPConnectionM m)
+connectStream' senderHost st =
     do (code1, _) <- parseResponse st
        unless (code1 == 220) $
               do bsClose st
                  fail "cannot connect to the server"
-       senderHost <- liftIO getHostName
        msg <- tryCommand (SMTPC st []) (EHLO senderHost) 3 250
        return (SMTPC st (tail $ BS.lines msg))
 
-parseResponse :: (MonadIO m) => BSStreamM m -> m (ReplyCode, ByteString)
+parseResponse :: (Monad m) => BSStreamM m -> m (ReplyCode, ByteString)
 parseResponse st =
     do (code, bdy) <- readLines
        return (read $ BS.unpack code, BS.unlines bdy)
@@ -146,7 +155,7 @@ parseResponse st =
 
 
 -- | send a method to a server
-sendCommand :: (MonadIO m) => SMTPConnectionM m -> Command -> m (ReplyCode, ByteString)
+sendCommand :: (Monad m) => SMTPConnectionM m -> Command -> m (ReplyCode, ByteString)
 sendCommand (SMTPC conn _) (DATA dat) =
     do bsPutCrLf conn $ BS.pack "DATA"
        (code, _) <- parseResponse conn
@@ -193,7 +202,7 @@ sendCommand (SMTPC conn _) meth =
 
 -- | close the connection.  This function send the QUIT method, so you
 -- do not have to QUIT method explicitly.
-closeSMTP :: (MonadIO m) => SMTPConnectionM m -> m ()
+closeSMTP :: (Monad m) => SMTPConnectionM m -> m ()
 closeSMTP (SMTPC conn _) = bsClose conn
 
 {-
@@ -206,12 +215,12 @@ without first sending QUIT
 
 closeSMTP c@(SMTPC conn _) =
     do sendCommand c QUIT
-       bsClose conn `catch` \(_ :: (MonadIO m) => IOException) -> return ()
+       bsClose conn `catch` \(_ :: (Monad m) => IOException) -> return ()
 -}
 
 -- | sending a mail to a server. This is achieved by sendMessage.  If
 -- something is wrong, it raises an IOexception.
-sendMail :: (MonadIO m) => String     -- ^ sender mail
+sendMail :: (Monad m) => String     -- ^ sender mail
          -> [String]   -- ^ receivers
          -> ByteString -- ^ data
          -> SMTPConnectionM m
@@ -260,5 +269,5 @@ lazyToStrict = S.concat . B.toChunks
 crlf :: BS.ByteString
 crlf = BS.pack "\r\n"
 
-bsPutCrLf :: (MonadIO m) => BSStreamM m -> ByteString -> m ()
+bsPutCrLf :: (Monad m) => BSStreamM m -> ByteString -> m ()
 bsPutCrLf h s = bsPut h s >> bsPut h crlf >> bsFlush h
